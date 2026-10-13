@@ -4,7 +4,7 @@ import type {
   Analysis, AuditEntry, Commune, CultureId, Filters, LatLng, Parcel, Region, Role, User,
 } from '../types';
 import { AREA_MAX, DEFAULT_COLORS, DEFAULT_SEASON, PIPELINE_STEPS, CURRENT_MODEL } from '../data/constants';
-import { api, maltoConfigured, type AnalyzeSimpleFeature } from '../api/services';
+import { api, maltoConfigured, type AnalyzeSimpleFeature, type AutomaticDetectionResult } from '../api/services';
 import { maltoVhrToFrontend, type MaltoVhrFeature } from '../api/maltoAdapter';
 import { pointInPolygon } from '../lib/geometry';
 
@@ -44,9 +44,12 @@ interface State {
   filtersOpen: boolean;
   setFiltersOpen: (v: boolean) => void;
 
-  drawing: boolean; draft: LatLng[]; zone: LatLng[] | null;
+  drawing: boolean; drawMode: 'zone' | 'parcel'; draft: LatLng[]; zone: LatLng[] | null; manualParcelDraft: LatLng[] | null;
   toasts: Toast[];
   traceInfo: TraceInfo | null;
+  automaticDetection: AutomaticDetectionResult | null;
+  automaticSearchCenter: LatLng | null;
+  selectedAutomaticParcelId: string | null;
 
   init: () => Promise<void>;
   login: (role: Role) => void;
@@ -62,8 +65,8 @@ interface State {
   select: (id: string | null) => void;
   flyTo: (t: Omit<FlyTarget, 'nonce'>) => void;
 
-  startDraw: () => void; addDraftPoint: (p: LatLng) => void; undoDraft: () => void;
-  finishDraw: () => void; cancelDraw: () => void; setZone: (z: LatLng[] | null) => void;
+  startDraw: () => void; startParcelDraw: () => void; addDraftPoint: (p: LatLng) => void; undoDraft: () => void;
+  finishDraw: () => void; cancelDraw: () => void; clearManualParcelDraft: () => void; addManualParcel: (p: Parcel) => void; setZone: (z: LatLng[] | null) => void;
 
   toast: (msg: string, tone?: Toast['tone']) => void;
   logAudit: (action: string, object: string) => void;
@@ -71,6 +74,9 @@ interface State {
   rejectParcel: (id: string) => void;
   createAnalysis: (input: { zoneLabel: string; regionId?: string; communeId?: string; seasonId: string; zone?: LatLng[] | null }) => Analysis;
   addTracedParcels: (added: Parcel[], info: TraceInfo) => number;
+  setAutomaticDetection: (result: AutomaticDetectionResult | null) => void;
+  setAutomaticSearchCenter: (center: LatLng | null) => void;
+  selectAutomaticParcel: (id: string | null) => void;
   relaunchAnalysis: (id: string) => void;
   setUserRole: (id: string, role: Role) => void;
   toggleUserActive: (id: string) => void;
@@ -96,9 +102,12 @@ export const useApp = create<State>()(
       fly: null,
       filtersOpen: false,
       setFiltersOpen: (v) => set({ filtersOpen: v }),
-      drawing: false, draft: [], zone: null,
+      drawing: false, drawMode: 'zone', draft: [], zone: null, manualParcelDraft: null,
       toasts: [],
       traceInfo: null,
+      automaticDetection: null,
+      automaticSearchCenter: null,
+      selectedAutomaticParcelId: null,
 
       init: async () => {
         if (get().ready) return;
@@ -148,16 +157,23 @@ export const useApp = create<State>()(
       select: (id) => set({ selectedId: id }),
       flyTo: (t) => set({ fly: { ...t, nonce: flySeq++ } }),
 
-      startDraw: () => set({ drawing: true, draft: [], selectedId: null }),
+      startDraw: () => set({ drawing: true, drawMode: 'zone', draft: [], manualParcelDraft: null, selectedId: null }),
+      startParcelDraw: () => set({ drawing: true, drawMode: 'parcel', draft: [], manualParcelDraft: null, selectedId: null }),
       addDraftPoint: (p) => set((s) => ({ draft: [...s.draft, p] })),
       undoDraft: () => set((s) => ({ draft: s.draft.slice(0, -1) })),
       finishDraw: () => {
-        const { draft } = get();
-        if (draft.length < 3) { get().toast('Placez au moins 3 points pour fermer la zone.', 'warn'); return; }
+        const { draft, drawMode } = get();
+        if (draft.length < 3) { get().toast('Placez au moins 3 points pour fermer le contour.', 'warn'); return; }
+        if (drawMode === 'parcel') {
+          set({ manualParcelDraft: draft, draft: [], drawing: false });
+          return;
+        }
         set({ zone: draft, draft: [], drawing: false });
         get().toast('Zone d’étude créée. Les filtres et statistiques s’y limitent.', 'ok');
       },
-      cancelDraw: () => set({ drawing: false, draft: [] }),
+      cancelDraw: () => set((s) => ({ drawing: false, draft: [], manualParcelDraft: s.drawMode === 'parcel' ? null : s.manualParcelDraft })),
+      clearManualParcelDraft: () => set({ manualParcelDraft: null }),
+      addManualParcel: (parcel) => set((s) => ({ parcels: [parcel, ...s.parcels], selectedId: parcel.id, manualParcelDraft: null })),
       setZone: (z) => set({ zone: z }),
 
       addTracedParcels: (added, info) => {
@@ -167,6 +183,9 @@ export const useApp = create<State>()(
         set((s) => ({ parcels: [...s.parcels, ...fresh], traceInfo: { ...info, added: fresh.length } }));
         return fresh.length;
       },
+      setAutomaticDetection: (result) => set({ automaticDetection: result }),
+      setAutomaticSearchCenter: (center) => set({ automaticSearchCenter: center }),
+      selectAutomaticParcel: (id) => set({ selectedAutomaticParcelId: id }),
 
       toast: (msg, tone = 'info') => {
         const id = toastSeq++;

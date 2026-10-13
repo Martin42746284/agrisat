@@ -69,10 +69,10 @@ export default function AppShell() {
       <main className="shell__page"><Outlet /></main>
 
       <div className="brandchip glass">
-        <svg viewBox="0 0 32 32" width="30" height="30" aria-hidden><rect width="32" height="32" rx="8" fill="#12262B" /><path d="M6 23l8-13 5 8 3-4 5 9z" fill="#E3B505" /></svg>
+        <img src="/agrisat-logo.svg" width="42" height="42" alt="Logo AGRISAT" />
         <div>
-          <strong>Cartographie agricole</strong>
-          <span>Madagascar <i className="pill" title="Aucune donnée n'est réelle : parcelles, cultures et métriques sont générées.">données fictives</i></span>
+          <strong>AGRISAT</strong>
+          <span>Agricultural Remote Sensing &amp; Detection</span>
         </div>
       </div>
 
