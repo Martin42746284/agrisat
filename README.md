@@ -28,10 +28,15 @@ Aucune variable d'environnement. Les fonds de carte (OSM, Esri) nécessitent Int
 | Rôles et permissions (REC-12), journal d'audit | `data/constants.ts` (ROLES), `Admin` |
 | Modèles IA : versions, F1, matrice de confusion | `Models` |
 
-## Brancher le vrai backend
-`src/api/services.ts` est la seule couche « API » : réécrire ses fonctions avec `fetch` vers FastAPI
-(`GET /api/parcelles?bbox=…`, `POST /api/analyses`, `POST /api/exports`, …). Le filtrage est ici fait côté client
-(3 800 parcelles) ; en production il doit être fait côté serveur (PostGIS) avec chargement par emprise/tuiles vectorielles.
+## Brancher le backend Malto
+La couche API (`src/api/services.ts`) interroge désormais le backend Malto (FastAPI + PostgreSQL/PostGIS) : routes
+`GET /api/bootstrap`, `POST /api/exports`, `POST /api/parcelles/{id}/signalements`. Pour l'activer, copier
+`.env.example` en `.env` puis renseigner `VITE_MALTO_API_URL` (sans slash final). Sans cette variable, l'app
+retombe automatiquement sur les données fictives locales (prototype). Un serveur Malto de test (mêmes routes,
+données générées) est fourni : `npx tsx scripts/malto-test-server.mjs` (port 8000).
+
+Le filtrage est fait côté client (3 800 parcelles) ; en production il doit être fait côté serveur (PostGIS) avec
+chargement par emprise/tuiles vectorielles.
 
 ## Limites connues du prototype
 - Fusion / scission de polygones : boutons désactivés (à relier à PostGIS).

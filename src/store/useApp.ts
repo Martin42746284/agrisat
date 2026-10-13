@@ -4,8 +4,8 @@ import type {
   Analysis, AuditEntry, Commune, CultureId, Filters, LatLng, Parcel, Region, Role, User,
 } from '../types';
 import { AREA_MAX, DEFAULT_COLORS, DEFAULT_SEASON, PIPELINE_STEPS, CURRENT_MODEL } from '../data/constants';
-import { USERS } from '../data/generate';
-import { api } from '../api/services';
+import { api, maltoConfigured, type AnalyzeSimpleFeature } from '../api/services';
+import { maltoVhrToFrontend, type MaltoVhrFeature } from '../api/maltoAdapter';
 import { pointInPolygon } from '../lib/geometry';
 
 export const DEFAULT_FILTERS: Filters = {
@@ -16,6 +16,15 @@ export const DEFAULT_FILTERS: Filters = {
 
 export interface FlyTarget { bounds?: [LatLng, LatLng]; center?: LatLng; zoom?: number; nonce: number }
 export interface Toast { id: number; msg: string; tone: 'ok' | 'info' | 'warn' | 'danger' }
+
+/** Résumé du dernier traçage automatique (contours IA — à présenter comme indicatifs). */
+export interface TraceInfo {
+  count: number;   // contours renvoyés par le backend
+  added: number;   // vraiment nouveaux (hors doublons déjà présents)
+  attribution?: string;
+  warnings: string[];
+  at: string;
+}
 
 interface State {
   ready: boolean;
@@ -37,6 +46,7 @@ interface State {
 
   drawing: boolean; draft: LatLng[]; zone: LatLng[] | null;
   toasts: Toast[];
+  traceInfo: TraceInfo | null;
 
   init: () => Promise<void>;
   login: (role: Role) => void;
@@ -60,6 +70,7 @@ interface State {
   correctParcel: (id: string, to: CultureId, note: string, kind: 'correction' | 'observation') => void;
   rejectParcel: (id: string) => void;
   createAnalysis: (input: { zoneLabel: string; regionId?: string; communeId?: string; seasonId: string; zone?: LatLng[] | null }) => Analysis;
+  addTracedParcels: (added: Parcel[], info: TraceInfo) => number;
   relaunchAnalysis: (id: string) => void;
   setUserRole: (id: string, role: Role) => void;
   toggleUserActive: (id: string) => void;
@@ -73,12 +84,12 @@ export const useApp = create<State>()(
   persist(
     (set, get) => ({
       ready: false,
-      parcels: [], regions: [], communes: [], analyses: [], users: USERS, audit: [],
+      parcels: [], regions: [], communes: [], analyses: [], users: [], audit: [],
       user: null,
       colors: { ...DEFAULT_COLORS },
       colorsByUser: {},
       threshold: 0.55,
-      basemap: 'plan',
+      basemap: 'satellite',
       showCoverage: true,
       filters: DEFAULT_FILTERS,
       selectedId: null,
@@ -87,6 +98,7 @@ export const useApp = create<State>()(
       setFiltersOpen: (v) => set({ filtersOpen: v }),
       drawing: false, draft: [], zone: null,
       toasts: [],
+      traceInfo: null,
 
       init: async () => {
         if (get().ready) return;
@@ -97,8 +109,14 @@ export const useApp = create<State>()(
       },
 
       login: (role) => {
-        const u = USERS.find((x) => x.role === role && x.active)!;
-        set((s) => ({ user: u, colors: s.colorsByUser[u.id] ?? { ...DEFAULT_COLORS } }));
+        const s = get();
+        // Compte de session local (l'authentification réelle viendra de Malto).
+        let u = s.users.find((x) => x.role === role && x.active) ??
+          ({ id: `local-${role}`, name: `Session ${role}`, email: '', role, active: true, lastLogin: new Date().toISOString() } as User);
+        if (!s.users.some((x) => x.id === u.id)) {
+          set((st) => ({ users: [u, ...st.users] }));
+        }
+        set((s2) => ({ user: u, colors: s2.colorsByUser[u.id] ?? { ...DEFAULT_COLORS } }));
         get().logAudit('Connexion', 'Session');
       },
       logout: () => set({ user: null, selectedId: null }),
@@ -141,6 +159,14 @@ export const useApp = create<State>()(
       },
       cancelDraw: () => set({ drawing: false, draft: [] }),
       setZone: (z) => set({ zone: z }),
+
+      addTracedParcels: (added, info) => {
+        const existing = new Set(get().parcels.map((p) => p.id));
+        const fresh = added.filter((p) => !existing.has(p.id));
+        // `info.added` est recalculé ici : nombre réel de contours nouveaux.
+        set((s) => ({ parcels: [...s.parcels, ...fresh], traceInfo: { ...info, added: fresh.length } }));
+        return fresh.length;
+      },
 
       toast: (msg, tone = 'info') => {
         const id = toastSeq++;
@@ -208,6 +234,59 @@ export const useApp = create<State>()(
         }
         set({ analyses: [base, ...s.analyses] });
         get().logAudit('Lancement d’analyse', `${zoneLabel} · ${seasonId}`);
+        if (api && 'analyzeSimple' in api) {
+          try {
+            if (maltoConfigured()) {
+              const center = pickCenter(s, { zoneLabel, regionId, communeId, zone });
+              const radiusM = pickRadiusM({ zone, center });
+              void runMaltoPipeline(id, center, radiusM, seasonId, zone ?? null).then((res) => {
+                const warns = res.warnings;
+                const ended = new Date().toISOString();
+                set((st) => ({
+                  analyses: st.analyses.map((x) =>
+                    x.id === id ? {
+                      ...x,
+                      status: warns.length ? 'terminee_avertissements' : 'terminee',
+                      progress: 100,
+                      startedAt: x.startedAt ?? now,
+                      finishedAt: ended,
+                      pipelineVersion: 'Malto · tracé JECAM-VHR + RF orge',
+                      scenes: res.scenes,
+                      warnings: warns,
+                      parcelCount: res.parcelCount,
+                      areaHa: res.areaHa,
+                      logs: [...x.logs, { at: ended, level: 'info' as const, msg: 'Pipeline Malto terminé — tracé automatique + classification orge (modèles existants).' }],
+                    } : x),
+                }));
+                get().toast(`Analyse ${id} terminée (Malto) : ${res.tracedCount} parcelles tracées, ${res.barleyCount} orge.`, 'ok');
+              }).catch((err) => {
+                const ended = new Date().toISOString();
+                set((st) => ({
+                  analyses: st.analyses.map((x) =>
+                    x.id === id ? {
+                      ...x,
+                      status: 'echec',
+                      progress: 100,
+                      startedAt: x.startedAt ?? now,
+                      finishedAt: ended,
+                      error: err instanceof Error ? err.message : String(err),
+                      logs: [...x.logs, { at: ended, level: 'warn' as const, msg: 'Appel Malto échoué — repli sur simulation.' }],
+                    } : x),
+                }));
+                setTimeout(() => runSimulation(id, inScope.length, inScope.reduce((t, p) => t + p.areaHa, 0), true), 400);
+              });
+              set((st) => ({
+                analyses: st.analyses.map((x) =>
+                  x.id === id ? { ...x, status: 'en_cours', startedAt: now, pipelineVersion: 'Malto /api/analyze (modèles IA réels)' } : x),
+              }));
+              return base;
+            }
+          } catch (e) {
+            // Préparation de l'appel Malto impossible (ex. données de périmètre incomplètes) :
+            // on journalise puis on laisse le repli simulation ci-dessous.
+            console.warn('[AgriSat] Préparation de l\'analyse Malto impossible, repli simulation :', e);
+          }
+        }
         setTimeout(() => runSimulation(id, inScope.length, inScope.reduce((t, p) => t + p.areaHa, 0), false), 1200);
         return base;
       },
@@ -237,12 +316,204 @@ export const useApp = create<State>()(
     }),
     {
       name: 'agri-mada-v1',
+      version: 2,
+      migrate: (persistedState) => ({
+        ...(persistedState as Pick<State, 'user' | 'colors' | 'colorsByUser' | 'threshold' | 'showCoverage'>),
+        basemap: 'satellite' as const,
+      }),
       partialize: (s) => ({ user: s.user, colors: s.colors, colorsByUser: s.colorsByUser, threshold: s.threshold, basemap: s.basemap, showCoverage: s.showCoverage }),
     },
   ),
 );
 
-/** Simule l'exécution asynchrone d'un pipeline (Celery côté vrai backend). */
+/** Centroïde arithmétique d'un anneau de sommets. */
+function avgPoint(coords: LatLng[]): LatLng {
+  if (!coords.length) return [0, 0];
+  let x = 0, y = 0;
+  for (const [a, b] of coords) { x += a; y += b; }
+  return [x / coords.length, y / coords.length];
+}
+
+function bboxRadiusM(coords: LatLng[], center: LatLng): number {
+  if (!coords.length) return 800;
+  let max = 0;
+  const [cx, cy] = center;
+  for (const [a, b] of coords) {
+    const dLat = (a - cx) * 111_000;
+    const dLon = (b - cy) * 111_000 * Math.cos((cx * Math.PI) / 180);
+    const d = Math.sqrt(dLat * dLat + dLon * dLon);
+    if (d > max) max = d;
+  }
+  return Math.max(200, Math.min(5000, Math.round(max * 1.2)));
+}
+
+function pickCenter(s: any, ctx: { zoneLabel: string; regionId?: string; communeId?: string; zone?: LatLng[] | null }): LatLng {
+  if (ctx.zone && ctx.zone.length >= 3) return avgPoint(ctx.zone);
+  if (ctx.communeId) {
+    const c = s.communes.find((x: any) => x.id === ctx.communeId);
+    if (c && c.outline?.length) return avgPoint(c.outline as LatLng[]);
+  }
+  if (ctx.regionId) {
+    const r = s.regions.find((x: any) => x.id === ctx.regionId);
+    if (r && r.outline?.length) return avgPoint(r.outline as LatLng[]);
+  }
+  return [-19.87, 47.03]; // Antsirabe approx
+}
+
+function pickRadiusM(ctx: { zone?: LatLng[] | null; center: LatLng }): number {
+  if (ctx.zone && ctx.zone.length >= 3) return bboxRadiusM(ctx.zone, ctx.center);
+  return 1000;
+}
+
+/** Résultat du pipeline Malto (tracé + classification orge). */
+interface MaltoPipelineResult {
+  warnings: string[];
+  scenes: number;
+  tracedCount: number;
+  barleyCount: number;
+  parcelCount: number;
+  areaHa: number;
+}
+
+/**
+ * Pipeline complet reprenant la méthode du frontend Malto :
+ *  1) tracé automatique des parcelles — POST /api/zone-parcels (modèle VHR
+ *     Delineate Anything JECAM) ;
+ *  2) classification orge/non-orge — POST /api/analyze avec `traced_parcels`
+ *     (classifieur RF Sentinel-2 appliqué aux contours tracés).
+ * Les parcelles tracées sont ajoutées au store (déduplication par id) puis
+ * classées (culture orge + confiance) lorsque le backend les confirme.
+ */
+async function runMaltoPipeline(
+  id: string,
+  center: LatLng,
+  radiusM: number,
+  seasonId: string,
+  zone: LatLng[] | null,
+): Promise<MaltoPipelineResult> {
+  const { getState, setState } = useApp;
+  const stamp = () => new Date().toISOString();
+  const patchLog = (msg: string, level: 'info' | 'warn' = 'info') =>
+    setState((s) => ({
+      analyses: s.analyses.map((a) =>
+        a.id === id ? { ...a, logs: [...a.logs, { at: stamp(), level, msg }] } : a),
+    }));
+
+  // 1) Tracé automatique des parcelles (JECAM-VHR) autour du centre du périmètre.
+  patchLog('Tracé automatique des parcelles (modèle VHR JECAM)…');
+  let traced: Parcel[] = [];
+  try {
+    const traceRadius = Math.min(1000, Math.max(200, radiusM)); // plafond du service de tracage
+    const zp = await api.zoneParcels({ latitude: center[0], longitude: center[1], radius_m: traceRadius });
+    const features = (zp.geojson?.features ?? []) as MaltoVhrFeature[];
+    const st = getState();
+    traced = maltoVhrToFrontend(features, { regions: st.regions, communes: st.communes })
+      .map((p) => ({
+        ...p,
+        results: { ...p.results, [seasonId]: { ...p.results[DEFAULT_SEASON], seasonId } },
+      }));
+    if (traced.length) {
+      const existing = new Set(st.parcels.map((p) => p.id));
+      const added = traced.filter((p) => !existing.has(p.id));
+      setState((s2) => ({ parcels: [...s2.parcels, ...added] }));
+      patchLog(
+        added.length === 0
+          ? `${traced.length} contours tracés (${traceRadius} m) — tous déjà présents. ` +
+            'Le service de tracage sert actuellement sa base précalculée quel que soit le lieu ; ' +
+            'une remesure côté service VHR est nécessaire pour obtenir de nouveaux contours.'
+          : `${traced.length} contours tracés (${traceRadius} m), dont ${added.length} nouvelles parcelles.`,
+      );
+    } else {
+      patchLog('Aucune parcelle tracée dans ce rayon (image ou service de tracage indisponible).', 'warn');
+    }
+  } catch (err) {
+    patchLog(`Tracé automatique indisponible : ${err instanceof Error ? err.message : String(err)}`, 'warn');
+  }
+
+  // 2) Classification orge/non-orge (RF Sentinel-2) des contours tracés.
+  patchLog('Classification orge/non-orge (modèle RF Sentinel-2) sur les parcelles tracées…');
+  const traced_parcels = traced.slice(0, 500).map((p) => ({
+    coordinates: p.coords.map(([lat, lng]) => ({ lat, lng })),
+  }));
+  const res = await api.analyzeSimple({
+    latitude: center[0],
+    longitude: center[1],
+    radius: radiusM,
+    traced_parcels,
+  });
+
+  // Application des verdicts orge : chaque feature est rattachée à la parcelle
+  // tracée dont le centroïde est le plus proche (< 100 m).
+  const feats = (res.features ?? []) as AnalyzeSimpleFeature[];
+  const classified = new Map<string, { conf: number; ndvi: number | null }>();
+  for (const f of feats) {
+    const ring = f.geometry?.type === 'Polygon' ? (f.geometry?.coordinates ?? [])[0] : undefined;
+    if (!ring || ring.length < 3) continue;
+    let fx = 0, fy = 0;
+    for (const [lng, lat] of ring) { fx += lng; fy += lat; }
+    const flat: LatLng = [fy / ring.length, fx / ring.length];
+    let best: Parcel | null = null;
+    let bestD = Infinity;
+    for (const p of traced) {
+      const dLat = (p.centroid[0] - flat[0]) * 111_000;
+      const dLon = (p.centroid[1] - flat[1]) * 111_000 * Math.cos((flat[0] * Math.PI) / 180);
+      const d = Math.hypot(dLat, dLon);
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    if (best && bestD < 100) {
+      const raw = f.properties?.confidence ?? 50;
+      classified.set(best.id, {
+        conf: Math.min(0.99, Math.max(0.05, raw > 1 ? raw / 100 : raw)),
+        ndvi: typeof f.properties?.meanNDVI === 'number' ? f.properties.meanNDVI : null,
+      });
+    }
+  }
+  let barleyCount = 0;
+  if (classified.size) {
+    setState((s2) => ({
+      parcels: s2.parcels.map((p) => {
+        const c = classified.get(p.id);
+        if (!c) return p;
+        barleyCount++;
+        return {
+          ...p,
+          results: {
+            ...p.results,
+            [seasonId]: {
+              seasonId,
+              culture: 'orge' as CultureId,
+              confidence: c.conf,
+              probs: { orge: c.conf } as Partial<Record<CultureId, number>>,
+              status: 'non_verifie' as const,
+              analysisId: id,
+              modelVersion: `Malto RF orge${c.ndvi != null ? ` · NDVI ${Math.round(c.ndvi)} %` : ''}`,
+              processedAt: stamp(),
+              observedFrom: stamp().slice(0, 10),
+              observedTo: stamp().slice(0, 10),
+            },
+          },
+        };
+      }),
+    }));
+  }
+  patchLog(`${barleyCount} parcelle(s) classée(s) ORGE (confiance du modèle, seuil backend).`);
+
+  // Stats finales recalculées sur le store à jour, limitées au périmètre de l'analyse.
+  const st = getState();
+  const scoped = st.parcels.filter(
+    (p) => p.results[seasonId] && (!zone || pointInPolygon(p.centroid, zone)),
+  );
+  return {
+    warnings: res.warnings ?? [],
+    scenes: typeof res.candidatesClassified === 'number' ? res.candidatesClassified : traced.length,
+    tracedCount: traced.length,
+    barleyCount,
+    parcelCount: scoped.length,
+    areaHa: scoped.reduce((t, p) => t + p.areaHa, 0),
+  };
+}
+
+/** Simule l'exécution asynchrone d'un pipeline — repli hors connexion Malto. */
 function runSimulation(id: string, count: number, area: number, partialOutcome: boolean) {
   const { getState, setState } = useApp;
   const patch = (fn: (a: Analysis) => Analysis) =>

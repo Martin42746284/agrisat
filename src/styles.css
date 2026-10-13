@@ -86,7 +86,6 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .legend__dim { width: 12px; height: 12px; background: #B9C0BE; opacity: .5; border-radius: 3px; border: 1px solid #9AA3A1; }
 .ln { width: 22px; height: 0; border-top: 2px solid #12262B; flex: none; } .ln--dash { border-top-style: dashed; } .ln--dot { border-top-style: dotted; border-top-width: 3px; } .ln--bold { border-top-width: 4px; } .ln--gap { border-top: 2px dashed #5B6770; }
 .zone-handle { width: 14px; height: 14px; background: #fff; border: 3px solid #0F7F86; border-radius: 50%; cursor: grab; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
-.leaflet-container { font-family: var(--font); }
 .ptip { font-size: 12.5px; line-height: 1.35; padding: 5px 8px; border-radius: 6px; }
 
 /* ---------- Fiche parcelle ---------- */
@@ -170,7 +169,8 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 
 /* carte plein écran */
 .page--map { display: block; }
-.map { position: absolute; inset: 0; background: #DCE5E2; } .map.is-drawing, .map.is-drawing .leaflet-interactive { cursor: crosshair; }
+.map { position: absolute; inset: 0; background: #DCE5E2; } .map.is-drawing { cursor: crosshair; }
+.map-message { display: grid; place-items: center; padding: 24px; color: var(--ink-2); background: var(--mist); text-align: center; }
 .parambar { position: absolute; z-index: 800; top: 12px; left: 50%; transform: translateX(-50%); width: min(900px, calc(100% - 700px)); min-width: 460px; padding: 8px 12px; display: grid; gap: 8px; }
 .parambar__chips { min-width: 0; }
 .parambar__ctrl { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; }
@@ -197,8 +197,6 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .mapnote { position: absolute; z-index: 700; left: 92px; right: 210px; bottom: 10px; padding: 5px 12px; display: flex; justify-content: space-between; gap: 4px 16px; flex-wrap: wrap; font-size: 11.5px; color: var(--ink-3); border-radius: 10px; }
 .map-hint { position: absolute; z-index: 700; left: 50%; top: 50%; transform: translate(-50%,-50%); padding: 16px 20px; display: grid; gap: 8px; text-align: center; max-width: 420px; } .map-hint div { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
 
-.leaflet-bottom.leaflet-right { margin-bottom: 8px; }
-body[data-drawer="open"] .leaflet-right { margin-right: calc(var(--drawer) + 24px); }
 body[data-drawer="open"] .maptools { right: calc(var(--drawer) + 24px); }
 .drawer { position: fixed; z-index: 1000; top: 76px; right: 12px; bottom: 12px; width: var(--drawer); background: rgba(250,252,251,.97); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 8px 30px rgba(18,38,43,.28); display: flex; flex-direction: column; overflow: hidden; }
 .menu__list.glass { z-index: 1100; }
@@ -219,6 +217,6 @@ body[data-drawer="open"] .maptools { right: calc(var(--drawer) + 24px); }
   .filters--float { left: 10px; right: 10px; width: auto; top: 72px; max-height: calc(100% - 160px); z-index: 1200; }
   .legend { left: 10px; bottom: 150px; width: 210px; max-height: 30%; } .mapnote { left: 10px; right: 10px; bottom: 76px; } .maptools { bottom: 190px; right: 10px; }
   .drawer { top: auto; height: 78%; right: 0; left: 0; width: auto; border-radius: 14px 14px 0 0; }
-  body[data-drawer="open"] .leaflet-right, body[data-drawer="open"] .maptools { margin-right: 0; right: 10px; }
+  body[data-drawer="open"] .maptools { margin-right: 0; right: 10px; }
   .login { grid-template-columns: 1fr; gap: 24px; } .grid2 { grid-template-columns: 1fr; }
 }

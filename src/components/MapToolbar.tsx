@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Check, Crosshair, Eraser, Home, Layers, PenTool, Search, Undo2, X, ScanSearch } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Check, Crosshair, Eraser, Home, Layers, PenTool, Search, Undo2, X, ScanSearch, Wand2 } from 'lucide-react';
 import { useApp } from '../store/useApp';
-import { bboxOf } from '../lib/geometry';
+import { bboxOf, centroidOf, M_PER_DEG_LAT, mPerDegLng } from '../lib/geometry';
 import { normalize } from '../lib/format';
+import { api } from '../api/services';
+import { maltoVhrToFrontend, type MaltoVhrFeature } from '../api/maltoAdapter';
 
 const NATIONAL: [[number, number], [number, number]] = [[-25.8, 43.0], [-11.8, 50.7]];
 
@@ -20,6 +22,66 @@ export default function MapToolbar({ onAnalyze, canLaunch }: { onAnalyze: () => 
   const draft = useApp((s) => s.draft);
   const zone = useApp((s) => s.zone);
   const { startDraw, undoDraft, finishDraw, cancelDraw, setZone } = useApp.getState();
+  const traceInfo = useApp((s) => s.traceInfo);
+  const addTracedParcels = useApp((s) => s.addTracedParcels);
+  const toast = useApp((s) => s.toast);
+  const [pending, setPending] = useState(false);
+  const [traceErr, setTraceErr] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Annulation au démontage (changement de page) : pas de mise à jour d'état après.
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  /**
+   * Traçage automatique des contours (backend AGRISAT → service JECAM / Delineate Anything).
+   * Rayon plafonné à 1 000 m, calcul long : requête annulable, garde anti double-clic.
+   */
+  const trace = async () => {
+    if (!zone || pending) return;
+    abortRef.current?.abort(); // annule une trace précédente éventuelle
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    setPending(true);
+    setTraceErr(null);
+    try {
+      const center = centroidOf(zone);
+      const kx = mPerDegLng(center[0]);
+      let maxM = 0;
+      for (const [la, lo] of zone) {
+        const d = Math.hypot((la - center[0]) * M_PER_DEG_LAT, (lo - center[1]) * kx);
+        if (d > maxM) maxM = d;
+      }
+      const radius_m = Math.min(1000, Math.max(200, Math.round(maxM * 1.2)));
+      const res = await api.zoneParcels(
+        { latitude: center[0], longitude: center[1], radius_m, min_confidence: 0, min_area_ha: 0, mode: 'simple' },
+        ctrl.signal,
+      );
+      if (ctrl.signal.aborted) return;
+      const features = (res.geojson?.features ?? []) as MaltoVhrFeature[];
+      const traced = maltoVhrToFrontend(features, { regions, communes });
+      const added = addTracedParcels(traced, {
+        count: traced.length,
+        added: 0, // recalculé par l'action (contours réellement nouveaux)
+        attribution: res.attribution,
+        warnings: res.warnings ?? [],
+        at: new Date().toISOString(),
+      });
+      toast(
+        traced.length === 0
+          ? 'Aucune parcelle tracée dans ce rayon (image ou service de tracage indisponible).'
+          : added === 0
+            ? `${traced.length} contours tracés — tous déjà présents, aucune nouvelle parcelle. ` +
+              'Le service de tracage renvoie actuellement sa base précalculée quel que soit le lieu ; ' +
+              'une remesure est nécessaire côté backend (service VHR) pour obtenir de nouveaux contours.'
+            : `${added} nouvelle(s) parcelle(s) ajoutée(s) — ${traced.length} contours tracés au total (IA indicatifs).`,
+        traced.length === 0 ? 'warn' : 'ok',
+      );
+    } catch (err) {
+      if (!ctrl.signal.aborted) setTraceErr(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (!ctrl.signal.aborted) setPending(false);
+    }
+  };
 
   const results = useMemo(() => {
     const n = normalize(q.trim());
@@ -72,7 +134,23 @@ export default function MapToolbar({ onAnalyze, canLaunch }: { onAnalyze: () => 
             <b>Zone d'étude</b>
             <button className="btn btn--sm" onClick={startDraw}><PenTool size={13} /> Redessiner</button>
             {canLaunch && <button className="btn btn--sm btn--primary" onClick={onAnalyze}><ScanSearch size={13} /> Analyser</button>}
+            <button className="btn btn--sm" onClick={trace} disabled={pending}
+              title="Tracer automatiquement les contours des parcelles (modèle JECAM via le backend)">
+              <Wand2 size={13} /> {pending ? 'Tracé en cours…' : 'Tracer les contours'}
+            </button>
             <button className="btn btn--sm" onClick={() => setZone(null)}><Eraser size={13} /> Supprimer</button>
+            {pending && <span className="hint">Tracé IA en cours — plusieurs dizaines de secondes possibles…</span>}
+            {traceErr && <p className="note note--danger">{traceErr}</p>}
+            {traceInfo && !pending && (
+              <div>
+                <span className="hint">
+                  {traceInfo.count} contour(s) tracé(s) — {traceInfo.added} nouvelle(s) parcelle(s) ajoutée(s).
+                  Contours IA indicatifs, confiance variable.
+                </span>
+                {traceInfo.attribution && <span className="hint"> {traceInfo.attribution}</span>}
+                {traceInfo.warnings.map((w) => <p key={w} className="note note--warn">{w}</p>)}
+              </div>
+            )}
           </div>
         )}
       </div>

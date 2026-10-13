@@ -16,7 +16,7 @@ export default function Login() {
           <path d="M18 84l32-54 10 17-18 37z" fill="#3E9B4F" opacity="0.9" />
         </svg>
         <h1>Cartographie agricole de Madagascar</h1>
-        <p>Parcelles détectées et cultures estimées à partir d'images satellite. Choisissez un profil pour explorer l'application avec des données fictives.</p>
+        <p>Parcelles détectées et cultures estimées à partir d'images satellite (données réelles du backend Malto). Choisissez une session pour explorer l'application.</p>
       </div>
       <div className="login__roles" role="list">
         {(Object.keys(ROLES) as Role[]).map((r) => (
