@@ -27,27 +27,34 @@ export default function MapView({ baseIds }: { baseIds: Set<string> }) {
   const fly = useApp((s) => s.fly);
   const drawing = useApp((s) => s.drawing);
   const draft = useApp((s) => s.draft);
+  const manualParcelDraft = useApp((s) => s.manualParcelDraft);
   const zone = useApp((s) => s.zone);
+  const automaticDetection = useApp((s) => s.automaticDetection);
+  const automaticSearchCenter = useApp((s) => s.automaticSearchCenter);
 
   const parcelLayers = useRef(new Map<string, google.maps.Polygon>());
   const onMap = useRef(new Set<string>());
   const regionLayers = useRef<google.maps.Polygon[]>([]);
   const communeLayers = useRef<google.maps.Polygon[]>([]);
+  const automaticLayers = useRef<google.maps.Polygon[]>([]);
   const draftLine = useRef<google.maps.Polyline | null>(null);
   const draftMarkers = useRef<google.maps.Marker[]>([]);
+  const manualPreview = useRef<google.maps.Polygon | null>(null);
   const zonePolygon = useRef<google.maps.Polygon | null>(null);
   const zoneMarkers = useRef<google.maps.Marker[]>([]);
   const infoWindow = useRef<google.maps.InfoWindow | null>(null);
+  const searchCenterMarker = useRef<google.maps.Marker | null>(null);
 
-  const latest = useRef({ parcels: new Map<string, Parcel>(), seasonId: f.seasonId, drawing });
+  const latest = useRef({ parcels: new Map<string, Parcel>(), seasonId: f.seasonId, drawing, automaticSearchCenter });
   latest.current.seasonId = f.seasonId;
   latest.current.drawing = drawing;
+  latest.current.automaticSearchCenter = automaticSearchCenter;
   const center = useMemo(() => DEFAULT_CENTER, []);
   const mapOptions = useMemo<google.maps.MapOptions>(() => ({
     mapTypeId: basemap === 'satellite' ? 'satellite' : 'roadmap',
     minZoom: 5,
     maxZoom: 18,
-    zoomControl: true,
+    zoomControl: false,
     scaleControl: true,
     mapTypeControl: false,
     streetViewControl: false,
@@ -64,6 +71,8 @@ export default function MapView({ baseIds }: { baseIds: Set<string> }) {
     const click = map.addListener('click', (event: google.maps.MapMouseEvent) => {
       if (latest.current.drawing && event.latLng) {
         useApp.getState().addDraftPoint([event.latLng.lat(), event.latLng.lng()]);
+      } else if (latest.current.automaticSearchCenter && event.latLng) {
+        useApp.getState().setAutomaticSearchCenter([event.latLng.lat(), event.latLng.lng()]);
       }
     });
     map.getDiv().classList.toggle('is-drawing', drawing);
@@ -73,16 +82,46 @@ export default function MapView({ baseIds }: { baseIds: Set<string> }) {
       click.remove();
       infoWindow.current?.close();
       infoWindow.current = null;
+      searchCenterMarker.current?.setMap(null);
+      searchCenterMarker.current = null;
       parcelLayers.current.forEach((layer) => layer.setMap(null));
       parcelLayers.current.clear();
       regionLayers.current.forEach((layer) => layer.setMap(null));
       regionLayers.current = [];
       communeLayers.current.forEach((layer) => layer.setMap(null));
       communeLayers.current = [];
+      automaticLayers.current.forEach((layer) => layer.setMap(null));
+      automaticLayers.current = [];
       map.getDiv().classList.remove('is-drawing');
       onMap.current.clear();
     };
   }, [map, traceIdleHandler]);
+
+  // Repère rouge déplaçable pour choisir le centre de l’analyse orge/non-orge.
+  useEffect(() => {
+    if (!map || !automaticSearchCenter) {
+      searchCenterMarker.current?.setMap(null);
+      searchCenterMarker.current = null;
+      return;
+    }
+    const position = { lat: automaticSearchCenter[0], lng: automaticSearchCenter[1] };
+    if (searchCenterMarker.current) {
+      searchCenterMarker.current.setPosition(position);
+      return;
+    }
+    const marker = new google.maps.Marker({
+      map,
+      position,
+      draggable: true,
+      title: 'Déplacer le centre de recherche de l’analyse orge/non-orge',
+      zIndex: google.maps.Marker.MAX_ZINDEX + 1,
+    });
+    marker.addListener('dragend', () => {
+      const next = marker.getPosition();
+      if (next) useApp.getState().setAutomaticSearchCenter([next.lat(), next.lng()]);
+    });
+    searchCenterMarker.current = marker;
+  }, [automaticSearchCenter, map]);
 
   // Fond de carte Google : imagerie satellite ou plan routier.
   useEffect(() => {
@@ -170,6 +209,54 @@ export default function MapView({ baseIds }: { baseIds: Set<string> }) {
       parcelLayers.current.set(parcel.id, polygon);
     }
   }, [map, parcels]);
+
+  // Résultats temporaires de recherche orge/non-orge, distincts des parcelles enregistrées.
+  useEffect(() => {
+    automaticLayers.current.forEach((layer) => layer.setMap(null));
+    automaticLayers.current = [];
+    if (!map || !automaticDetection) return;
+
+    for (const candidate of automaticDetection.parcels) {
+      const points = candidate.coordinates
+        .filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lng))
+        .map(({ lat, lng }) => ({ lat, lng }));
+      if (points.length < 3) continue;
+      const presence = candidate.analysis?.barley_presence;
+      const color = presence === 'confirmed' ? '#16A34A'
+        : presence === 'probable' ? '#E3B505'
+          : presence === 'none' ? '#64748B' : '#38BDF8';
+      const polygon = new google.maps.Polygon({
+        map,
+        paths: points,
+        strokeColor: color,
+        strokeOpacity: 1,
+        strokeWeight: 2.5,
+        fillColor: color,
+        fillOpacity: presence === 'confirmed' || presence === 'probable' ? 0.16 : 0.06,
+        clickable: true,
+        zIndex: 30,
+      });
+      polygon.addListener('click', (event: google.maps.MapMouseEvent) => {
+        useApp.getState().selectAutomaticParcel(candidate.id);
+      });
+      automaticLayers.current.push(polygon);
+
+      for (const segment of candidate.analysis?.detected_segments ?? []) {
+        if (segment.coordinates.length < 3) continue;
+        automaticLayers.current.push(new google.maps.Polygon({
+          map,
+          paths: segment.coordinates.map(({ lat, lng }) => ({ lat, lng })),
+          strokeColor: '#FACC15', strokeOpacity: 1, strokeWeight: 2,
+          fillColor: '#FACC15', fillOpacity: 0.24,
+          clickable: false, zIndex: 40,
+        }));
+      }
+    }
+    return () => {
+      automaticLayers.current.forEach((layer) => layer.setMap(null));
+      automaticLayers.current = [];
+    };
+  }, [automaticDetection, map]);
 
   // Visibilité et styles : aucun nouveau calcul IA lors d’un changement de filtre.
   useEffect(() => {
@@ -267,6 +354,23 @@ export default function MapView({ baseIds }: { baseIds: Set<string> }) {
       }));
     });
   }, [draft, map]);
+
+  useEffect(() => {
+    manualPreview.current?.setMap(null);
+    manualPreview.current = null;
+    if (!map || !manualParcelDraft) return;
+    manualPreview.current = new google.maps.Polygon({
+      map,
+      paths: manualParcelDraft.map(([lat, lng]) => ({ lat, lng })),
+      strokeColor: '#1689C9', strokeOpacity: 1, strokeWeight: 3,
+      fillColor: '#38BDF8', fillOpacity: 0.18,
+      clickable: false, zIndex: 80,
+    });
+    return () => {
+      manualPreview.current?.setMap(null);
+      manualPreview.current = null;
+    };
+  }, [manualParcelDraft, map]);
 
   useEffect(() => {
     zonePolygon.current?.setMap(null);

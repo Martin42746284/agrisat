@@ -26,7 +26,36 @@ export interface BootstrapDb {
   audit: AuditEntry[];
 }
 
-export const maltoConfigured = () => API_BASE.length > 0;export interface ExportJob { id: string; url: string }/** * Modèles IA réellement déployés côté Malto (GET /api/modeles). * `classification_orge` : pipeline RF sklearn (projet modele_orge, métriques du * jeu de test indépendant) ; `delimitation_vhr` : état du service de tracage VHR. */export interface DeployedModels {  classification_orge: {    nom: string; type: string; fichier: string; present: boolean;    statut: 'pret' | 'fichier absent' | 'indisponible';    modifie_le?: string;    metriques?: {      seuil: number; accuracy: number; precision_orge: number; rappel_orge: number;      precision_non_orge: number; rappel_non_orge: number; f1_orge: number;      roc_auc: number; pr_auc: number; tn: number; fp: number; fn: number; tp: number;    };    entrainement?: {      n_features: number; n_lignes: number; n_splits: number; anti_leakage_ok: boolean;      meilleurs_parametres: Record<string, string | number | null>;    };  };  delimitation_vhr: {    nom: string; type: string; service: string;    statut: 'pret' | 'injoignable' | 'erreur';    modele_charge?: string;    modele_present?: boolean;    modes?: string[];  };}
+export const maltoConfigured = () => API_BASE.length > 0;export interface ExportJob { id: string; url: string }
+
+/**
+ * Modèles IA réellement déployés côté Malto (GET /api/modeles).
+ * `classification_orge` : pipeline RF sklearn (projet modele_orge, métriques du
+ * jeu de test indépendant) ; `delimitation_vhr` : état du service de tracage VHR.
+ */
+export interface DeployedModels {
+  classification_orge: {
+    nom: string; type: string; fichier: string; present: boolean;
+    statut: 'pret' | 'fichier absent' | 'indisponible';
+    modifie_le?: string;
+    metriques?: {
+      seuil: number; accuracy: number; precision_orge: number; rappel_orge: number;
+      precision_non_orge: number; rappel_non_orge: number; f1_orge: number;
+      roc_auc: number; pr_auc: number; tn: number; fp: number; fn: number; tp: number;
+    };
+    entrainement?: {
+      n_features: number; n_lignes: number; n_splits: number; anti_leakage_ok: boolean;
+      meilleurs_parametres: Record<string, string | number | null>;
+    };
+  };
+  delimitation_vhr: {
+    nom: string; type: string; service: string;
+    statut: 'pret' | 'injoignable' | 'erreur';
+    modele_charge?: string;
+    modele_present?: boolean;
+    modes?: string[];
+  };
+}
 
 /** Payload POST /api/analyze — schéma Malto AnalyzeSimpleRequest (champs requis : latitude, longitude, radius en m). */
 export interface AnalyzeSimplePayload {
@@ -50,6 +79,71 @@ export interface DetectParcelsPayload {
   threshold: number;
   periodDays: number;
   tracedParcels?: unknown[];
+}
+
+export interface AutomaticDetectionParcel {
+  id: string;
+  coordinates: Array<{ lat: number; lng: number }>;
+  center: { lat: number; lng: number };
+  tags: Record<string, string>;
+  analysis: {
+    is_barley?: boolean;
+    barley_presence?: 'confirmed' | 'probable' | 'none';
+    culture_detected?: string;
+    verdict?: string;
+    confidence?: number;
+    percentage?: number;
+    s2_prob_barley?: number | null;
+    rf_prob_barley?: number | null;
+    rf_threshold?: number | null;
+    rf_available?: boolean;
+    cnn_prob_barley?: number | null;
+    cnn_prob_non_barley?: number | null;
+    cnn_available?: boolean;
+    evi?: number | null;
+    savi?: number | null;
+    ndwi?: number | null;
+    agro_score?: number | null;
+    agro_details?: string;
+    hybrid_score?: number | null;
+    saison?: string | null;
+    soil_type?: string | null;
+    risk_factors?: string[];
+    recommendations?: string | null;
+    anomaly_level?: string;
+    data_source?: string;
+    radar_analysis?: string | null;
+    spectral_analysis?: string | null;
+    details?: string;
+    estimated_planting_date?: string | null;
+    estimated_harvest_date?: string | null;
+    days_since_planting?: number | null;
+    growth_stage?: string | null;
+    planting_confidence?: number | null;
+    warnings?: string[];
+    gdd_cumulative?: number;
+    gdd_threshold?: number;
+    gdd_base_temperature?: number;
+    gdd_start_date?: string | null;
+    gdd_end_date?: string | null;
+    gdd_detected?: boolean;
+    gdd_error?: string | null;
+    detected_segments?: Array<{ coordinates: Array<{ lat: number; lng: number }>; confidence: number; area_ha: number }>;
+    [key: string]: unknown;
+  } | null;
+  analysis_error: string | null;
+}
+
+export interface AutomaticDetectionResult {
+  center: { lat: number; lng: number };
+  radius_km: number;
+  base_temperature: number;
+  threshold: number;
+  period_days: number;
+  candidates_found: number;
+  analyzed_count: number;
+  parcels: AutomaticDetectionParcel[];
+  notice: string | null;
 }
 
 /** Feature GeoJSON renvoyée par POST /api/analyze avec traced_parcels (classification orge). */
@@ -108,6 +202,44 @@ export interface ZoneParcelsResult {
   [k: string]: unknown;
 }
 
+export interface CreateMaltoParcelPayload {
+  label: string;
+  coordinates: Array<{ lat: number; lng: number }>;
+  center_lat: number;
+  center_lng: number;
+  surface_ha: number;
+  culture_declared: string;
+  culture_detected: null;
+  ndvi_percentage: null;
+  ndre: null;
+  spectral_bands: null;
+  confidence: null;
+  verdict: string;
+  details: string;
+  saison: null;
+  soil_type: null;
+  risk_factors: string[];
+  recommendations: null;
+  data_source: string;
+  owner_name: string;
+  notes: string;
+  time_series_s2: unknown[];
+  time_series_s1: unknown[];
+  time_series_rain: unknown[];
+  estimated_planting_date: null;
+  estimated_harvest_date: null;
+  days_since_planting: null;
+  growth_stage: null;
+  planting_confidence: null;
+  evi: null;
+  savi: null;
+  ndwi: null;
+  agro_score: null;
+  hybrid_score: null;
+  cnn_prob_barley: null;
+  cnn_prob_non_barley: null;
+}
+
 export const api = {
   /** Charge les données réelles de la base au démarrage (aucune donnée fictive). */
   async bootstrap(): Promise<BootstrapDb> {
@@ -146,11 +278,11 @@ export const api = {
   },
 
   /** Détection automatique de parcelles (GDD + base parcelles). */
-  async detectParcels(payload: DetectParcelsPayload): Promise<AnalyzeSimpleResult> {
-    return request<AnalyzeSimpleResult>('/api/detect-parcels', {
+  async detectParcels(payload: DetectParcelsPayload): Promise<AutomaticDetectionResult> {
+    return request<AutomaticDetectionResult>('/api/detect-parcels', {
       method: 'POST',
       body: JSON.stringify(payload),
-    }, ANALYZE_TIMEOUT_MS);
+    }, DETECT_PARCELS_TIMEOUT_MS);
   },
 
   /**
@@ -164,6 +296,14 @@ export const api = {
       signal: signal ?? null,
     }, ZONE_PARCELS_TIMEOUT_MS);
   },
+
+    /** Enregistre dans Malto une parcelle dessinée manuellement sur la carte. */
+    async createParcel(payload: CreateMaltoParcelPayload): Promise<Record<string, unknown>> {
+      return request<Record<string, unknown>>('/api/parcelles', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }, 30_000);
+    },
 
   /** Route absente côté Malto — simulation locale conservée. */
   async reportParcel(id: string, message: string): Promise<void> {
@@ -184,4 +324,5 @@ const EXPORT_FALLBACK_MS = 700;
 const EXPORT_REPORT_FALLBACK_MS = 400;
 // Les appels d'inférence Malto sont longs (scènes Sentinel-2 + modèle) : timeouts dédiés.
 const ANALYZE_TIMEOUT_MS = 240_000;
+const DETECT_PARCELS_TIMEOUT_MS = 600_000;
 const ZONE_PARCELS_TIMEOUT_MS = 600_000; // mode « mix » ≈ 5–7 min

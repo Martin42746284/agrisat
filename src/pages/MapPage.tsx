@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useApp } from '../store/useApp';
 import { useAggregate, useBase, useFinal } from '../store/selectors';
-import { CULTURE_BY_ID, DISCLAIMER, ROLES, SEASON_BY_ID } from '../data/constants';
+import { CULTURE_BY_ID, ROLES, SEASON_BY_ID } from '../data/constants';
 import { fmtDate, fmtHa, fmtInt } from '../lib/format';
 import { bboxOf } from '../lib/geometry';
 import type { DisplayMode } from '../types';
@@ -103,10 +103,6 @@ export default function MapPage() {
         </div>
       )}
 
-      <footer className="mapnote glass">
-        <span>{DISCLAIMER}</span>
-        <span>{season?.short} · images du {imageRange} · {season?.modelVersion}</span>
-      </footer>
       {analysis && <NewAnalysisModal onClose={() => setAnalysis(false)} withZone />}
     </div>
   );
