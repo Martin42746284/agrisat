@@ -1,9 +1,10 @@
 import { useMemo, useState } from 'react';
-import { X, Pencil, ClipboardCheck, Flag, Trash2, Merge, Split } from 'lucide-react';
+import { X, Pencil, ClipboardCheck, Flag, Trash2, Merge, Split, Check, Move } from 'lucide-react';
 import { useApp } from '../store/useApp';
 import { CULTURES, CULTURE_BY_ID, ROLES, SEASONS, SEASON_BY_ID } from '../data/constants';
 import { fmtDate, fmtHa, fmtPct } from '../lib/format';
 import { isUncertain } from '../lib/filter';
+import { ringAreaHa } from '../lib/geometry';
 import { api } from '../api/services';
 import type { CultureId, Parcel } from '../types';
 import { ConfidenceBar, Modal, StatusBadge, Swatch } from './ui';
@@ -31,10 +32,14 @@ export default function ParcelDrawer() {
   const communes = useApp((s) => s.communes);
   const regions = useApp((s) => s.regions);
   const select = useApp((s) => s.select);
+  const editingParcelId = useApp((s) => s.editingParcelId);
+  const editingCoords = useApp((s) => s.editingCoords);
+  const { startEditParcel, cancelEditParcel, saveEditParcel } = useApp.getState();
   const [modal, setModal] = useState<null | 'correct' | 'observe' | 'report' | 'reject'>(null);
 
   const p = useMemo(() => parcels.find((x) => x.id === id), [parcels, id]);
   if (!p) return null;
+  const editing = editingParcelId === p.id && !!editingCoords;
   const r = p.results[seasonId];
   const can = user ? ROLES[user.role].can : null;
   const commune = communes.find((c) => c.id === p.communeId);
@@ -51,6 +56,24 @@ export default function ParcelDrawer() {
         </div>
         <button className="icon-btn" onClick={() => select(null)} aria-label="Fermer la fiche"><X size={18} /></button>
       </header>
+
+      {editing && editingCoords && (
+        <div className="editbar" role="region" aria-label="Mode édition du contour">
+          <div className="editbar__head">
+            <b><Move size={14} /> Édition du contour</b>
+            <span className="hint">{editingCoords.length} sommets</span>
+          </div>
+          <p className="hint">Déplacez les points blancs du polygone sur la carte pour ajuster la parcelle, puis validez.</p>
+          <dl className="kv">
+            <dt>Superficie après modification</dt>
+            <dd className="big">{fmtHa(ringAreaHa(editingCoords))}</dd>
+          </dl>
+          <div className="actions">
+            <button className="btn btn--primary" onClick={saveEditParcel}><Check size={14} /> Valider le contour</button>
+            <button className="btn" onClick={cancelEditParcel}><X size={14} /> Annuler</button>
+          </div>
+        </div>
+      )}
 
       {!r ? (
         <p className="drawer__empty">Aucun résultat pour la saison « {SEASON_BY_ID[seasonId]?.short} ». Choisissez une autre saison.</p>
@@ -131,6 +154,7 @@ export default function ParcelDrawer() {
           </section>
 
           <section className="actions">
+            {can?.correct && !editing && <button className="btn" onClick={() => startEditParcel(p.id)} title="Ou double-cliquez la parcelle sur la carte"><Move size={14} /> Modifier le contour</button>}
             {can?.correct && <button className="btn btn--primary" onClick={() => setModal('correct')}><Pencil size={14} /> Corriger la classe</button>}
             {can?.observe && <button className="btn" onClick={() => setModal('observe')}><ClipboardCheck size={14} /> Saisir une observation</button>}
             <button className="btn" onClick={() => setModal('report')}><Flag size={14} /> Signaler un problème</button>

@@ -19,6 +19,64 @@ export function ringAreaHa(coords: LatLng[]): number {
   return Math.abs(a) / 2 / 10000;
 }
 
+/**
+ * Identifie si deux parcelles désignent le même champ agricole :
+ * - même identifiant,
+ * - ou le centroïde de l'une tombe dans le contour de l'autre (recouvrement géométrique),
+ * - ou centroïdes très proches avec chevauchement des boîtes englobantes et surfaces compatibles.
+ *
+ * Évite les doublons entre le traçage VHR automatique et les parcelles déjà enregistrées en base,
+ * ainsi qu'entre tuiles adjacentes lors des déplacements sur la carte.
+ */
+export function isDuplicateVhrParcel(
+  a: { id: string; coords: LatLng[]; centroid: LatLng; areaHa: number; results?: Record<string, { modelVersion?: string }> },
+  b: { id: string; coords: LatLng[]; centroid: LatLng; areaHa: number; results?: Record<string, { modelVersion?: string }> },
+): boolean {
+  if (a.id === b.id) return true;
+  if (!a.coords?.length || !b.coords?.length || a.areaHa <= 0 || b.areaHa <= 0) return false;
+
+  const areaA = a.areaHa * 10_000;
+  const areaB = b.areaHa * 10_000;
+  const minArea = Math.min(areaA, areaB);
+  const maxArea = Math.max(areaA, areaB);
+  const areaRatio = minArea / maxArea;
+
+  // 1) Test préliminaire de boîte englobante avec marge de sécurité (~25 mètres)
+  const degMargin = 25 / M_PER_DEG_LAT;
+  const [[minLaA, minLoA], [maxLaA, maxLoA]] = bboxOf(a.coords);
+  const [[minLaB, minLoB], [maxLaB, maxLoB]] = bboxOf(b.coords);
+  if (
+    minLaA > maxLaB + degMargin ||
+    maxLaA < minLaB - degMargin ||
+    minLoA > maxLoB + degMargin ||
+    maxLoA < minLoB - degMargin
+  ) {
+    return false;
+  }
+
+  // 2) Critère spatial majeur : le centre de l'un est contenu dans le polygone de l'autre
+  // Gère parfaitement les décalages de contour entre Sentinel-2 (BDD) et VHR (traçage auto).
+  if (areaRatio >= 0.25) {
+    if (pointInPolygon(a.centroid, b.coords) || pointInPolygon(b.centroid, a.coords)) {
+      return true;
+    }
+  }
+
+  // 3) Proximité des centroïdes et ratio de surface pour les parcelles concaves ou allongées
+  const latitude = (a.centroid[0] + b.centroid[0]) / 2;
+  const east = (a.centroid[1] - b.centroid[1]) * mPerDegLng(latitude);
+  const north = (a.centroid[0] - b.centroid[0]) * M_PER_DEG_LAT;
+  const centerDistM = Math.hypot(north, east);
+
+  // Tolérance adaptative à la racine de la surface (entre 18 m et 45 m)
+  const centerToleranceM = Math.max(18, Math.min(45, Math.sqrt(maxArea) * 0.22));
+  if (areaRatio >= 0.4 && centerDistM <= centerToleranceM) {
+    return true;
+  }
+
+  return false;
+}
+
 export function centroidOf(coords: LatLng[]): LatLng {
   const n = coords.length;
   return [coords.reduce((s, c) => s + c[0], 0) / n, coords.reduce((s, c) => s + c[1], 0) / n];

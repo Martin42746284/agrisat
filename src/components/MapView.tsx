@@ -2,10 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { GoogleMap, useJsApiLoader } from '@react-google-maps/api';
 import { useApp } from '../store/useApp';
 import { computeStyle } from '../lib/style';
-import { cultureLabel } from '../data/constants';
+import { cultureLabel, ROLES } from '../data/constants';
 import { fmtHa } from '../lib/format';
 import type { Parcel } from '../types';
 import { useViewportParcelTracing } from '../hooks/useViewportParcelTracing';
+import { parcelOutlineStyle } from '../lib/parcel-outline-style';
 
 const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY ?? '';
 const DEFAULT_CENTER = { lat: -19.848219, lng: 47.011882 };
@@ -31,6 +32,7 @@ export default function MapView({ baseIds }: { baseIds: Set<string> }) {
   const zone = useApp((s) => s.zone);
   const automaticDetection = useApp((s) => s.automaticDetection);
   const automaticSearchCenter = useApp((s) => s.automaticSearchCenter);
+  const editingParcelId = useApp((s) => s.editingParcelId);
 
   const parcelLayers = useRef(new Map<string, google.maps.Polygon>());
   const onMap = useRef(new Set<string>());
@@ -42,6 +44,7 @@ export default function MapView({ baseIds }: { baseIds: Set<string> }) {
   const manualPreview = useRef<google.maps.Polygon | null>(null);
   const zonePolygon = useRef<google.maps.Polygon | null>(null);
   const zoneMarkers = useRef<google.maps.Marker[]>([]);
+  const editMarkers = useRef<google.maps.Marker[]>([]);
   const infoWindow = useRef<google.maps.InfoWindow | null>(null);
   const searchCenterMarker = useRef<google.maps.Marker | null>(null);
 
@@ -184,8 +187,32 @@ export default function MapView({ baseIds }: { baseIds: Set<string> }) {
     latest.current.parcels = index;
     if (!map) return;
 
+    // Nettoie les polygones qui ne sont plus dans parcels (ex: suppression de doublons)
+    const currentIds = new Set(parcels.map((p) => p.id));
+    for (const [id, polygon] of parcelLayers.current.entries()) {
+      if (!currentIds.has(id)) {
+        polygon.setMap(null);
+        parcelLayers.current.delete(id);
+        onMap.current.delete(id);
+      }
+    }
+
     for (const parcel of parcels) {
-      if (parcelLayers.current.has(parcel.id)) continue;
+      const existing = parcelLayers.current.get(parcel.id);
+      if (existing) {
+        // En édition, le chemin est porté par les sommets déplaçables : on ne le réécrit pas.
+        if (parcel.id === editingParcelId) continue;
+        // Garde le tracé affiché aligné sur la parcelle (contour modifié, import, déduplication…).
+        const path = existing.getPath();
+        let same = path.getLength() === parcel.coords.length;
+        for (let i = 0; same && i < parcel.coords.length; i++) {
+          const v = path.getAt(i);
+          same = Math.abs(v.lat() - parcel.coords[i][0]) < 1e-9 && Math.abs(v.lng() - parcel.coords[i][1]) < 1e-9;
+        }
+        if (same) continue;
+        existing.setPath(parcel.coords.map(([lat, lng]) => ({ lat, lng })));
+        continue;
+      }
       const polygon = new google.maps.Polygon({
         map: null,
         paths: parcel.coords.map(([lat, lng]) => ({ lat, lng })),
@@ -194,6 +221,16 @@ export default function MapView({ baseIds }: { baseIds: Set<string> }) {
       });
       polygon.addListener('click', () => {
         if (!latest.current.drawing) useApp.getState().select(parcel.id);
+      });
+      // Double-clic : passe en édition du contour (sommets déplaçables). Droit limité par le rôle.
+      polygon.addListener('dblclick', () => {
+        const s = useApp.getState();
+        if (s.drawing) return;
+        if (!s.user || !ROLES[s.user.role].can.correct) {
+          s.toast('Votre profil ne permet pas de modifier le contour d’une parcelle.', 'warn');
+          return;
+        }
+        s.startEditParcel(parcel.id);
       });
       polygon.addListener('mouseover', (event: google.maps.MapMouseEvent) => {
         const current = latest.current.parcels.get(parcel.id);
@@ -208,7 +245,7 @@ export default function MapView({ baseIds }: { baseIds: Set<string> }) {
       polygon.addListener('mouseout', () => infoWindow.current?.close());
       parcelLayers.current.set(parcel.id, polygon);
     }
-  }, [map, parcels]);
+  }, [map, parcels, editingParcelId]);
 
   // Résultats temporaires de recherche orge/non-orge, distincts des parcelles enregistrées.
   useEffect(() => {
@@ -265,6 +302,15 @@ export default function MapView({ baseIds }: { baseIds: Set<string> }) {
     for (const parcel of parcels) {
       const polygon = parcelLayers.current.get(parcel.id);
       if (!polygon) continue;
+      // Parcelle en cours d'édition : jamais masquée par les filtres pendant la modification.
+      if (parcel.id === editingParcelId) {
+        polygon.setOptions({ strokeColor: '#0F7F86', strokeOpacity: 1, strokeWeight: 4, fillColor: '#0F7F86', fillOpacity: 0.14, zIndex: 1200 });
+        if (!onMap.current.has(parcel.id)) {
+          polygon.setMap(map);
+          onMap.current.add(parcel.id);
+        }
+        continue;
+      }
       const result = parcel.results[f.seasonId];
       const wanted = !!result && baseIds.has(parcel.id);
       if (!wanted) {
@@ -278,20 +324,72 @@ export default function MapView({ baseIds }: { baseIds: Set<string> }) {
         onMap.current.delete(parcel.id);
         continue;
       }
-      polygon.setOptions({
-        fillColor: options.fillColor,
-        fillOpacity: options.fillOpacity,
-        strokeColor: options.color,
-        strokeOpacity: options.opacity,
-        strokeWeight: options.weight,
-        zIndex: parcel.id === selectedId ? 1000 : 10,
-      });
+      const isVhrOutline = result.modelVersion.includes('Delineate Anything');
+      const displayStyle = isVhrOutline
+        ? parcelOutlineStyle(parcel, parcel.id === selectedId)
+        : {
+          fillColor: options.fillColor,
+          fillOpacity: options.fillOpacity,
+          strokeColor: options.color,
+          strokeOpacity: options.opacity,
+          strokeWeight: options.weight,
+        };
+      polygon.setOptions({ ...displayStyle, zIndex: parcel.id === selectedId ? 1000 : 10 });
       if (!onMap.current.has(parcel.id)) {
         polygon.setMap(map);
         onMap.current.add(parcel.id);
       }
     }
-  }, [map, parcels, baseIds, f.mode, f.cultures, f.othersStyle, f.seasonId, colors, threshold, selectedId]);
+  }, [map, parcels, baseIds, f.mode, f.cultures, f.othersStyle, f.seasonId, colors, threshold, selectedId, editingParcelId]);
+
+  // Mode édition : le contour reste visible, surmonté, et ses sommets deviennent déplaçables.
+  useEffect(() => {
+    editMarkers.current.forEach((marker) => marker.setMap(null));
+    editMarkers.current = [];
+    if (!map) return;
+    // Le double-clic sert à éditer : on évite en parallèle le zoom de la carte.
+    map.setOptions({ disableDoubleClickZoom: !!editingParcelId });
+    if (!editingParcelId) return;
+    const polygon = parcelLayers.current.get(editingParcelId);
+    const start = useApp.getState().editingCoords;
+    if (!polygon || !start || start.length < 3) return;
+
+    const points = start.map(([lat, lng]) => ({ lat, lng }));
+    polygon.setPath(points);
+    polygon.setOptions({ strokeColor: '#0F7F86', strokeOpacity: 1, strokeWeight: 4, fillColor: '#0F7F86', fillOpacity: 0.14, zIndex: 1200 });
+    polygon.setMap(map);
+    onMap.current.add(editingParcelId);
+
+    start.forEach((_, index) => {
+      const marker = new google.maps.Marker({
+        map,
+        position: points[index],
+        draggable: true,
+        zIndex: google.maps.Marker.MAX_ZINDEX + 2,
+        title: `Sommet ${index + 1} — déplacez pour ajuster le contour`,
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          scale: 7,
+          fillColor: '#fff', fillOpacity: 1,
+          strokeColor: '#0F7F86', strokeWeight: 3,
+        },
+      });
+      marker.addListener('drag', () => {
+        const position = marker.getPosition();
+        if (!position) return;
+        points[index] = { lat: position.lat(), lng: position.lng() };
+        polygon.setPath(points);
+      });
+      marker.addListener('dragend', () => {
+        useApp.getState().setEditingCoords(points.map(({ lat, lng }) => [lat, lng] as [number, number]));
+      });
+      editMarkers.current.push(marker);
+    });
+    return () => {
+      editMarkers.current.forEach((marker) => marker.setMap(null));
+      editMarkers.current = [];
+    };
+  }, [map, editingParcelId]);
 
   // Afficher/masquer la couverture sans recréer les polygones.
   useEffect(() => {
