@@ -56,7 +56,7 @@ export default function MapView({ baseIds }: { baseIds: Set<string> }) {
   const mapOptions = useMemo<google.maps.MapOptions>(() => ({
     mapTypeId: basemap === 'satellite' ? 'satellite' : 'roadmap',
     minZoom: 5,
-    maxZoom: 18,
+    maxZoom: 21,
     zoomControl: false,
     scaleControl: true,
     mapTypeControl: false,
