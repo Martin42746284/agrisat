@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { GoogleMap, useJsApiLoader } from '@react-google-maps/api';
 import { useApp } from '../store/useApp';
 import { computeStyle } from '../lib/style';
+import { ringAreaHa } from '../lib/geometry';
 import { cultureLabel, ROLES } from '../data/constants';
 import { fmtHa } from '../lib/format';
 import type { Parcel } from '../types';
@@ -29,6 +30,7 @@ export default function MapView({ baseIds }: { baseIds: Set<string> }) {
   const drawing = useApp((s) => s.drawing);
   const draft = useApp((s) => s.draft);
   const manualParcelDraft = useApp((s) => s.manualParcelDraft);
+  const drawMode = useApp((s) => s.drawMode);
   const zone = useApp((s) => s.zone);
   const automaticDetection = useApp((s) => s.automaticDetection);
   const automaticSearchCenter = useApp((s) => s.automaticSearchCenter);
@@ -324,7 +326,8 @@ export default function MapView({ baseIds }: { baseIds: Set<string> }) {
         onMap.current.delete(parcel.id);
         continue;
       }
-      const isVhrOutline = result.modelVersion.includes('Delineate Anything');
+      const isManualParcel = result.analysisId.startsWith('MALTO-') && (result.culture === 'inconnue' || !result.confidence);
+      const isVhrOutline = result.modelVersion.includes('Delineate Anything') || isManualParcel;
       const displayStyle = isVhrOutline
         ? parcelOutlineStyle(parcel, parcel.id === selectedId)
         : {
@@ -433,7 +436,7 @@ export default function MapView({ baseIds }: { baseIds: Set<string> }) {
       draftLine.current = new google.maps.Polyline({
         map,
         path: draft.map(([lat, lng]) => ({ lat, lng })),
-        strokeColor: '#0F7F86', strokeOpacity: 1, strokeWeight: 2.5,
+        strokeColor: drawMode === 'parcel' ? '#FFFFFF' : '#0F7F86', strokeOpacity: drawMode === 'parcel' ? 0.96 : 1, strokeWeight: drawMode === 'parcel' ? 2 : 2.5,
         icons: [{ icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, scale: 3 }, offset: '0', repeat: '8px' }],
         clickable: false,
       });
@@ -447,7 +450,7 @@ export default function MapView({ baseIds }: { baseIds: Set<string> }) {
           path: google.maps.SymbolPath.CIRCLE,
           scale: index === 0 ? 6 : 4,
           fillColor: '#fff', fillOpacity: 1,
-          strokeColor: '#0F7F86', strokeWeight: 2,
+          strokeColor: drawMode === 'parcel' ? '#FFFFFF' : '#0F7F86', strokeWeight: 2,
         },
       }));
     });
@@ -457,12 +460,12 @@ export default function MapView({ baseIds }: { baseIds: Set<string> }) {
     manualPreview.current?.setMap(null);
     manualPreview.current = null;
     if (!map || !manualParcelDraft) return;
+    const previewStyle = parcelOutlineStyle({ areaHa: ringAreaHa(manualParcelDraft) } as Parcel, false);
     manualPreview.current = new google.maps.Polygon({
       map,
       paths: manualParcelDraft.map(([lat, lng]) => ({ lat, lng })),
-      strokeColor: '#1689C9', strokeOpacity: 1, strokeWeight: 3,
-      fillColor: '#38BDF8', fillOpacity: 0.18,
-      clickable: false, zIndex: 80,
+      strokeColor: previewStyle.strokeColor, strokeOpacity: previewStyle.strokeOpacity, strokeWeight: previewStyle.strokeWeight,
+      fillColor: previewStyle.fillColor, fillOpacity: previewStyle.fillOpacity,
     });
     return () => {
       manualPreview.current?.setMap(null);
