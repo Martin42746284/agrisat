@@ -69,7 +69,7 @@ export default function AppShell() {
       <main className="shell__page"><Outlet /></main>
 
       <div className="brandchip glass">
-        <img src="/agrisat-logo.svg" width="42" height="42" alt="Logo AGRISAT" />
+        <img src="/remove.png" width="72" height="72" alt="Logo AGRISAT" />
         <div>
           <strong>AGRISAT</strong>
           <span>Agricultural Remote Sensing &amp; Detection</span>
