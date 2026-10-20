@@ -3,10 +3,10 @@ import { persist } from 'zustand/middleware';
 import type {
   Analysis, AuditEntry, Commune, CultureId, Filters, LatLng, Parcel, Region, Role, User,
 } from '../types';
-import { AREA_MAX, DEFAULT_COLORS, DEFAULT_SEASON, PIPELINE_STEPS, CURRENT_MODEL } from '../data/constants';
+import { AREA_MAX, DEFAULT_COLORS, DEFAULT_SEASON, PIPELINE_STEPS, CURRENT_MODEL, ROLES } from '../data/constants';
 import { api, maltoConfigured, type AnalyzeSimpleFeature, type AutomaticDetectionResult } from '../api/services';
 import { maltoVhrToFrontend, type MaltoVhrFeature } from '../api/maltoAdapter';
-import { pointInPolygon } from '../lib/geometry';
+import { centroidOf, isDuplicateVhrParcel, pointInPolygon, ringAreaHa } from '../lib/geometry';
 
 export const DEFAULT_FILTERS: Filters = {
   cultures: [], mode: 'general', othersStyle: 'grise',
@@ -51,6 +51,11 @@ interface State {
   automaticSearchCenter: LatLng | null;
   selectedAutomaticParcelId: string | null;
 
+  /** Édition du contour d'une parcelle (double-clic sur la parcelle dans la carte). */
+  editingParcelId: string | null;
+  /** Sommets en cours de déplacement — recopiés au save dans `parcels`. */
+  editingCoords: LatLng[] | null;
+
   init: () => Promise<void>;
   login: (role: Role) => void;
   logout: () => void;
@@ -64,6 +69,10 @@ interface State {
   setShowCoverage: (v: boolean) => void;
   select: (id: string | null) => void;
   flyTo: (t: Omit<FlyTarget, 'nonce'>) => void;
+  startEditParcel: (id: string) => void;
+  setEditingCoords: (coords: LatLng[]) => void;
+  cancelEditParcel: () => void;
+  saveEditParcel: () => void;
 
   startDraw: () => void; startParcelDraw: () => void; addDraftPoint: (p: LatLng) => void; undoDraft: () => void;
   finishDraw: () => void; cancelDraw: () => void; clearManualParcelDraft: () => void; addManualParcel: (p: Parcel) => void; setZone: (z: LatLng[] | null) => void;
@@ -108,6 +117,8 @@ export const useApp = create<State>()(
       automaticDetection: null,
       automaticSearchCenter: null,
       selectedAutomaticParcelId: null,
+      editingParcelId: null,
+      editingCoords: null,
 
       init: async () => {
         if (get().ready) return;
@@ -154,8 +165,63 @@ export const useApp = create<State>()(
       setThreshold: (v) => set({ threshold: v }),
       setBasemap: (b) => set({ basemap: b }),
       setShowCoverage: (v) => set({ showCoverage: v }),
-      select: (id) => set({ selectedId: id }),
+      // Changer de sélection (ou fermer la fiche) met fin à une édition en cours.
+      select: (id) =>
+        set((s) => ({
+          selectedId: id,
+          ...(s.editingParcelId && s.editingParcelId !== id
+            ? { editingParcelId: null, editingCoords: null }
+            : {}),
+        })),
       flyTo: (t) => set({ fly: { ...t, nonce: flySeq++ } }),
+
+      startEditParcel: (id) => {
+        const s = get();
+        const parcel = s.parcels.find((p) => p.id === id);
+        if (!parcel) return;
+        if (!s.user || !ROLES[s.user.role].can.correct) {
+          s.toast('Votre profil ne permet pas de modifier le contour d’une parcelle.', 'warn');
+          return;
+        }
+        set({
+          selectedId: id,
+          editingParcelId: id,
+          editingCoords: parcel.coords.map(([lat, lng]) => [lat, lng] as LatLng),
+        });
+      },
+      setEditingCoords: (coords) => set({ editingCoords: coords }),
+      cancelEditParcel: () => {
+        set({ editingParcelId: null, editingCoords: null });
+        get().toast('Édition annulée — contour inchangé.', 'info');
+      },
+      saveEditParcel: () => {
+        const s = get();
+        const id = s.editingParcelId;
+        const coords = s.editingCoords;
+        if (!id || !coords) return;
+        if (coords.length < 3) {
+          s.toast('Le contour doit compter au moins 3 sommets.', 'warn');
+          return;
+        }
+        const before = s.parcels.find((p) => p.id === id);
+        if (!before) {
+          set({ editingParcelId: null, editingCoords: null });
+          return;
+        }
+        const centroid = centroidOf(coords);
+        const areaHa = ringAreaHa(coords);
+        set({
+          parcels: s.parcels.map((p) =>
+            p.id === id ? { ...p, coords, centroid, areaHa } : p),
+          editingParcelId: null,
+          editingCoords: null,
+        });
+        get().logAudit('Modification du contour', `Parcelle ${id}`);
+        get().toast(
+          `Contour de ${id} mis à jour : ${before.areaHa.toFixed(2)} → ${areaHa.toFixed(2)} ha.`,
+          'ok',
+        );
+      },
 
       startDraw: () => set({ drawing: true, drawMode: 'zone', draft: [], manualParcelDraft: null, selectedId: null }),
       startParcelDraw: () => set({ drawing: true, drawMode: 'parcel', draft: [], manualParcelDraft: null, selectedId: null }),
@@ -173,12 +239,22 @@ export const useApp = create<State>()(
       },
       cancelDraw: () => set((s) => ({ drawing: false, draft: [], manualParcelDraft: s.drawMode === 'parcel' ? null : s.manualParcelDraft })),
       clearManualParcelDraft: () => set({ manualParcelDraft: null }),
-      addManualParcel: (parcel) => set((s) => ({ parcels: [parcel, ...s.parcels], selectedId: parcel.id, manualParcelDraft: null })),
+      addManualParcel: (parcel) =>
+        set((s) => ({
+          parcels: [parcel, ...s.parcels.filter((p) => !isDuplicateVhrParcel(p, parcel))],
+          selectedId: parcel.id,
+          manualParcelDraft: null,
+        })),
       setZone: (z) => set({ zone: z }),
 
       addTracedParcels: (added, info) => {
-        const existing = new Set(get().parcels.map((p) => p.id));
-        const fresh = added.filter((p) => !existing.has(p.id));
+        const known = [...get().parcels];
+        const fresh: Parcel[] = [];
+        for (const candidate of added) {
+          if (known.some((parcel) => isDuplicateVhrParcel(parcel, candidate))) continue;
+          fresh.push(candidate);
+          known.push(candidate);
+        }
         // `info.added` est recalculé ici : nombre réel de contours nouveaux.
         set((s) => ({ parcels: [...s.parcels, ...fresh], traceInfo: { ...info, added: fresh.length } }));
         return fresh.length;
